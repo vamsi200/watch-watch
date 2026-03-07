@@ -1,0 +1,308 @@
+#![allow(unused)]
+use anyhow::{Error, anyhow};
+use avro_rs::{Reader, Writer, schema, types::Record};
+use chrono::{DateTime, Utc};
+use rdkafka::producer::Producer;
+use serde::Serialize;
+use std::{
+    collections::HashMap,
+    fs::{self, File, read_link},
+    io::{BufRead, BufReader, Read, empty},
+    os::{
+        fd::{self, FromRawFd},
+        unix::{fs::PermissionsExt, process},
+    },
+    path::{Path, PathBuf},
+    time::Instant,
+};
+
+#[derive(Debug, Serialize)]
+pub struct TcpEvent {
+    timestamp: i64,
+    local_ip: String,
+    local_port: u16,
+    remote_ip: String,
+    remote_port: u16,
+    state: TcpState,
+    pid: Option<u32>,
+    process_name: Option<String>,
+    tx_queue: u32,
+    rx_queue: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UdpEvent {
+    timestamp: i64,
+    local_ip: String,
+    local_port: u16,
+    pid: Option<u32>,
+    process_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+pub enum TcpState {
+    Established,
+    Listen,
+    SynSent,
+    SynRecv,
+    FinWait1,
+    FinWait2,
+    Close,
+    CloseWait,
+    LastAck,
+    TimeWait,
+    Closing,
+    Unknown,
+}
+
+pub fn tcp_state_name(state: u64) -> TcpState {
+    match state {
+        0x01 => TcpState::Established,
+        0x02 => TcpState::SynSent,
+        0x03 => TcpState::SynRecv,
+        0x04 => TcpState::FinWait1,
+        0x05 => TcpState::FinWait2,
+        0x06 => TcpState::TimeWait,
+        0x07 => TcpState::Close,
+        0x08 => TcpState::CloseWait,
+        0x09 => TcpState::LastAck,
+        0x0A => TcpState::Listen,
+        0x0B => TcpState::Closing,
+        _ => TcpState::Unknown,
+    }
+}
+
+pub fn parse_ip(ip: &str) -> anyhow::Result<(String, u16)> {
+    let mut sp = ip.split(":");
+    let s = sp.next().ok_or(anyhow!("invalid ip"))?;
+
+    let ip_bytes = (0..4)
+        .map(|x| u8::from_str_radix(&s[2 * x..2 * x + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let ip = [ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]];
+    let port_hex_value = sp.next().ok_or(anyhow!("invalid port"))?;
+    let port = u16::from_str_radix(port_hex_value, 16)?;
+    let ip = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    Ok((ip, port))
+}
+
+pub fn parse_queue(queue: &str) -> anyhow::Result<(u32, u32), Error> {
+    let mut split = queue.split(":");
+    let p_s = split.next().ok_or(anyhow!("invalid queue"))?;
+    let tx_queue = u32::from_str_radix(p_s, 16)?;
+    let p_s = split.next().ok_or(anyhow!("invalid queue"))?;
+    let rx_queue = u32::from_str_radix(p_s, 16)?;
+
+    Ok((tx_queue, rx_queue))
+}
+
+pub fn build_pid_map() -> anyhow::Result<HashMap<String, PathBuf>> {
+    let mut out = HashMap::new();
+    for rd in fs::read_dir("/proc/")? {
+        let entry = rd?;
+        let new_path = PathBuf::from(format!("{}/fd/", entry.path().display()));
+
+        if new_path.exists() && new_path.is_dir() {
+            for rd in fs::read_dir(&new_path)? {
+                let entry = rd?;
+                if entry.metadata().unwrap().is_symlink() {
+                    if let Ok(s) = read_link(entry.path()) {
+                        if s.to_string_lossy().starts_with("socket:[") {
+                            let path = entry.path();
+                            let mut split: Vec<&str> = path
+                                .to_str()
+                                .unwrap()
+                                .strip_prefix("/proc/")
+                                .unwrap()
+                                .split("/")
+                                .collect();
+
+                            out.insert(split[0].to_string(), s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn get_process_name(pid: &str) -> anyhow::Result<String> {
+    let path = format!("/proc/{pid}/comm");
+    let mut file = File::open(path)?;
+    let mut out = String::new();
+    file.read_to_string(&mut out);
+    Ok(out.trim_start().trim_end().to_string())
+}
+
+pub fn parse_proc_net_tcp() -> anyhow::Result<Vec<TcpEvent>> {
+    let mut file = File::open("/proc/net/tcp")?;
+    let mut content = String::new();
+    let mut reader = BufReader::new(file);
+    let mut tcp_events = Vec::new();
+    let mut pid_map = build_pid_map()?;
+
+    for line in reader.lines().skip(1) {
+        let line = line?;
+        let mut fs: Vec<&str> = line.trim().split_whitespace().collect();
+        let (local_ip, local_port) = parse_ip(fs[1])?;
+        let (remote_ip, remote_port) = parse_ip(fs[2])?;
+        let state = u64::from_str_radix(fs[3], 16)?;
+        let tcp_state = tcp_state_name(state);
+        let (tx_queue, rx_queue) = parse_queue(fs[4])?;
+        let time_stamp = if tcp_state == TcpState::Established {
+            Utc::now().timestamp_millis()
+        } else {
+            continue;
+        };
+
+        let (mut pid, mut process_name) = (None, None);
+
+        if let Some(s) = pid_map
+            .iter()
+            .find(|s| s.1.to_string_lossy().contains(fs[9]))
+        {
+            pid = Some(s.0.parse::<u32>().unwrap());
+            process_name = Some(get_process_name(s.0)?);
+        }
+
+        let tcp_ev = TcpEvent {
+            local_ip,
+            local_port,
+            remote_ip,
+            remote_port,
+            state: tcp_state,
+            tx_queue,
+            rx_queue,
+            timestamp: time_stamp,
+            pid,
+            process_name,
+        };
+        tcp_events.push(tcp_ev);
+    }
+
+    Ok(tcp_events)
+}
+
+pub fn parse_net_udp() -> anyhow::Result<Vec<UdpEvent>> {
+    let mut pid_map = build_pid_map()?;
+    let mut file = File::open("/proc/net/udp")?;
+    let mut reader = BufReader::new(&mut file);
+    let mut udp_ev = Vec::new();
+
+    for line in reader.lines().skip(1) {
+        let line = line?;
+        let fs: Vec<&str> = line.trim().split_whitespace().collect();
+        let (local_ip, local_port) = parse_ip(fs[1])?;
+        let state = u64::from_str_radix(fs[3], 16)?;
+        let tcp_state = tcp_state_name(state);
+        let (tx_queue, rx_queue) = parse_queue(fs[4])?;
+        let time_stamp = Utc::now().timestamp_millis();
+
+        let (mut pid, mut process_name) = (None, None);
+
+        if let Some(s) = pid_map
+            .iter()
+            .find(|s| s.1.to_string_lossy().contains(fs[9]))
+        {
+            pid = Some(s.0.parse::<u32>().unwrap());
+            process_name = Some(get_process_name(s.0)?);
+        }
+
+        let ev = UdpEvent {
+            local_ip,
+            local_port,
+            pid,
+            process_name,
+            timestamp: time_stamp,
+        };
+
+        udp_ev.push(ev);
+    }
+
+    Ok(udp_ev)
+}
+
+#[derive(Serialize, Debug)]
+pub enum EvenType {
+    TcpEvent(TcpEvent),
+    UdpEvent(UdpEvent),
+}
+
+pub fn serialize_data(ev: TcpEvent) -> anyhow::Result<Vec<u8>> {
+    let raw_schema = r#"
+    {
+    "type": "record",
+    "name": "TcpEvent",
+    "namespace": "watch-watch.network",
+    "fields": [
+        {
+        "name": "timestamp",
+        "type": "long"
+        },
+        {
+        "name": "local_ip",
+        "type": "string"
+        },
+        {
+        "name": "local_port",
+        "type": "int"
+        },
+        {
+        "name": "remote_ip",
+        "type": "string"
+        },
+        {
+        "name": "remote_port",
+        "type": "int"
+        },
+        {
+        "name": "state",
+        "type": {
+            "type": "enum",
+            "name": "TcpState",
+            "symbols": [
+            "Established",
+            "SynSent",
+            "SynRecv",
+            "FinWait1",
+            "FinWait2",
+            "TimeWait",
+            "Close",
+            "CloseWait",
+            "LastAck",
+            "Listen",
+            "Closing",
+            "Unknown"
+            ]
+        }
+        },
+        {
+        "name": "pid",
+        "type": ["null", "int"],
+        "default": null
+        },
+        {
+        "name": "process_name",
+        "type": ["null", "string"],
+        "default": null
+        },
+        {
+        "name": "tx_queue",
+        "type": "int"
+        },
+        {
+        "name": "rx_queue",
+        "type": "int"
+        }
+    ]
+    }
+        "#;
+    let schema = avro_rs::Schema::parse_str(raw_schema).unwrap();
+    let mut writer = Writer::new(&schema, Vec::new());
+    let s = writer.append_ser(ev)?;
+    let input = writer.into_inner()?;
+    Ok(input)
+}
