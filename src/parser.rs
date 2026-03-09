@@ -6,6 +6,8 @@ use rdkafka::ClientConfig;
 use rdkafka::producer::Producer;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde::Serialize;
+use std::os::unix::fs::MetadataExt;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{
     collections::HashMap,
@@ -103,40 +105,49 @@ pub fn parse_queue(queue: &str) -> anyhow::Result<(u32, u32), Error> {
     Ok((tx_queue, rx_queue))
 }
 
-pub fn build_pid_map() -> anyhow::Result<HashMap<String, PathBuf>> {
-    let mut out = HashMap::new();
-    for rd in fs::read_dir("/proc/")? {
-        let entry = rd?;
-        let new_path = PathBuf::from(format!("{}/fd/", entry.path().display()));
+pub fn build_pid_map() -> anyhow::Result<HashMap<u64, u32>> {
+    let mut map = HashMap::new();
 
-        if new_path.exists() && new_path.is_dir() {
-            for rd in fs::read_dir(&new_path)? {
-                let entry = rd?;
-                if let Ok(meta) = entry.metadata() {
-                    if meta.is_symlink() {
-                        if let Ok(s) = read_link(entry.path()) {
-                            if s.to_string_lossy().starts_with("socket:[") {
-                                let path = entry.path();
-                                let mut split: Vec<&str> = path
-                                    .to_str()
-                                    .unwrap()
-                                    .strip_prefix("/proc/")
-                                    .unwrap()
-                                    .split("/")
-                                    .collect();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let pid_str = entry.file_name().to_str().unwrap().to_string();
 
-                                out.insert(split[0].to_string(), s);
-                            }
-                        }
+        if !pid_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        let pid: u32 = match pid_str.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let fd_dir = entry.path().join("fd");
+
+        if !fd_dir.is_dir() {
+            continue;
+        }
+
+        for fd in fs::read_dir(fd_dir)? {
+            let fd = fd?;
+
+            if let Ok(target) = fs::read_link(fd.path()) {
+                let s = target.to_string_lossy();
+
+                if let Some(inode_str) =
+                    s.strip_prefix("socket:[").and_then(|v| v.strip_suffix("]"))
+                {
+                    if let Ok(inode) = inode_str.parse::<u64>() {
+                        map.insert(inode, pid);
                     }
                 }
             }
         }
     }
-    Ok(out)
+
+    Ok(map)
 }
 
-pub fn get_process_name(pid: &str) -> anyhow::Result<String> {
+pub fn get_process_name(pid: &u32) -> anyhow::Result<String> {
     let path = format!("/proc/{pid}/comm");
     let mut file = File::open(path)?;
     let mut out = String::new();
@@ -144,9 +155,14 @@ pub fn get_process_name(pid: &str) -> anyhow::Result<String> {
     Ok(out.trim_start().trim_end().to_string())
 }
 
-pub async fn parse_proc_net_tcp(sender: UnboundedSender<EvenType>) -> anyhow::Result<()> {
+pub type PidMap = Arc<RwLock<HashMap<u64, u32>>>;
+
+pub async fn parse_proc_net_tcp(
+    sender: UnboundedSender<EvenType>,
+    pid_map: PidMap,
+) -> anyhow::Result<()> {
+    println!("Sending Tcp Events..");
     loop {
-        let mut pid_map = build_pid_map()?;
         let mut file = File::open("/proc/net/tcp")?;
         let mut reader = BufReader::new(file);
         for line in reader.lines().skip(1) {
@@ -165,13 +181,11 @@ pub async fn parse_proc_net_tcp(sender: UnboundedSender<EvenType>) -> anyhow::Re
 
             let (mut pid, mut process_name) = (None, None);
 
-            // this is expensive.
-            if let Some(s) = pid_map
-                .iter()
-                .find(|s| s.1.to_string_lossy().contains(fs[9]))
-            {
-                pid = Some(s.0.parse::<u32>().unwrap());
-                process_name = Some(get_process_name(s.0)?);
+            let inode = fs[9].parse::<u64>()?;
+            let pid_map = pid_map.read().unwrap();
+            if let Some(s) = pid_map.iter().find(|s| *s.0 == inode) {
+                pid = Some(s.1.clone());
+                process_name = Some(get_process_name(s.1)?);
             }
 
             let tcp_ev = TcpEvent {
@@ -188,48 +202,53 @@ pub async fn parse_proc_net_tcp(sender: UnboundedSender<EvenType>) -> anyhow::Re
             };
             sender.send(EvenType::TcpEvent(tcp_ev));
         }
-        println!("Sleeping `5`s..");
+        println!("Tcp channel Sleeping `5`s..");
         sleep(Duration::from_secs(5)).await;
     }
 
     Ok(())
 }
 
-pub async fn parse_net_udp(sender: UnboundedSender<EvenType>) -> anyhow::Result<()> {
-    let mut pid_map = build_pid_map()?;
-    let mut file = File::open("/proc/net/udp")?;
-    let mut reader = BufReader::new(&mut file);
+pub async fn parse_net_udp(
+    sender: UnboundedSender<EvenType>,
+    pid_map: PidMap,
+) -> anyhow::Result<()> {
+    println!("Sending Udp Events..");
+    loop {
+        let mut file = File::open("/proc/net/udp")?;
+        let mut reader = BufReader::new(&mut file);
 
-    for line in reader.lines().skip(1) {
-        let line = line?;
-        let fs: Vec<&str> = line.trim().split_whitespace().collect();
-        let (local_ip, local_port) = parse_ip(fs[1])?;
-        let state = u64::from_str_radix(fs[3], 16)?;
-        let tcp_state = tcp_state_name(state);
-        let (tx_queue, rx_queue) = parse_queue(fs[4])?;
-        let time_stamp = Utc::now().timestamp_millis();
+        for line in reader.lines().skip(1) {
+            let line = line?;
+            let fs: Vec<&str> = line.trim().split_whitespace().collect();
+            let (local_ip, local_port) = parse_ip(fs[1])?;
+            let state = u64::from_str_radix(fs[3], 16)?;
+            let tcp_state = tcp_state_name(state);
+            let (tx_queue, rx_queue) = parse_queue(fs[4])?;
+            let time_stamp = Utc::now().timestamp_millis();
 
-        let (mut pid, mut process_name) = (None, None);
+            let (mut pid, mut process_name) = (None, None);
 
-        if let Some(s) = pid_map
-            .iter()
-            .find(|s| s.1.to_string_lossy().contains(fs[9]))
-        {
-            pid = Some(s.0.parse::<u32>().unwrap());
-            process_name = Some(get_process_name(s.0)?);
+            let inode = fs[9].parse::<u64>()?;
+            let pid_map = pid_map.read().unwrap();
+            if let Some(s) = pid_map.iter().find(|s| *s.0 == inode) {
+                pid = Some(s.1.clone());
+                process_name = Some(get_process_name(s.1)?);
+            }
+
+            let ev = UdpEvent {
+                local_ip,
+                local_port,
+                pid,
+                process_name,
+                timestamp: time_stamp,
+            };
+
+            sender.send(EvenType::UdpEvent(ev));
         }
-
-        let ev = UdpEvent {
-            local_ip,
-            local_port,
-            pid,
-            process_name,
-            timestamp: time_stamp,
-        };
-
-        sender.send(EvenType::UdpEvent(ev));
+        println!("Udp channel Sleeping `5`s..");
+        sleep(Duration::from_secs(5)).await;
     }
-
     Ok(())
 }
 

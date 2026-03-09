@@ -20,6 +20,5 @@ pub async fn connect_kafka(
         .await
         .unwrap();
 
-    println!("Event Sent!");
     Ok(())
 }

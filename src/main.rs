@@ -2,8 +2,27 @@
 
 use rdkafka::ClientConfig;
 use rdkafka::producer::FutureProducer;
-use watch_watch::parser::{self, EvenType, TcpEvent, UdpEvent, serialize_data};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::time::sleep;
+use watch_watch::parser::{
+    self, EvenType, PidMap, TcpEvent, UdpEvent, build_pid_map, serialize_data,
+};
 use watch_watch::producer::connect_kafka;
+
+async fn refresh_pid_map(map: PidMap) -> anyhow::Result<()> {
+    println!("Refreshing Pid map..");
+    loop {
+        let new_map = build_pid_map()?;
+        {
+            let mut guard = map.write().unwrap();
+            *guard = new_map;
+        }
+        println!("Refreshing Pid map every `30`s");
+        sleep(Duration::from_secs(30));
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,10 +31,13 @@ async fn main() -> anyhow::Result<()> {
         .create()
         .unwrap();
 
+    let pid_map: PidMap = Arc::new(RwLock::new(HashMap::new()));
+
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<EvenType>();
 
-    tokio::spawn(parser::parse_proc_net_tcp(sender.clone()));
-    tokio::spawn(parser::parse_net_udp(sender));
+    tokio::spawn(refresh_pid_map(pid_map.clone()));
+    tokio::spawn(parser::parse_proc_net_tcp(sender.clone(), pid_map.clone()));
+    tokio::spawn(parser::parse_net_udp(sender, pid_map));
 
     while let Some(event_type) = receiver.recv().await {
         match event_type {
