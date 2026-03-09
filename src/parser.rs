@@ -18,6 +18,8 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::sleep;
 
 #[derive(Debug, Serialize)]
 pub struct TcpEvent {
@@ -110,19 +112,21 @@ pub fn build_pid_map() -> anyhow::Result<HashMap<String, PathBuf>> {
         if new_path.exists() && new_path.is_dir() {
             for rd in fs::read_dir(&new_path)? {
                 let entry = rd?;
-                if entry.metadata().unwrap().is_symlink() {
-                    if let Ok(s) = read_link(entry.path()) {
-                        if s.to_string_lossy().starts_with("socket:[") {
-                            let path = entry.path();
-                            let mut split: Vec<&str> = path
-                                .to_str()
-                                .unwrap()
-                                .strip_prefix("/proc/")
-                                .unwrap()
-                                .split("/")
-                                .collect();
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_symlink() {
+                        if let Ok(s) = read_link(entry.path()) {
+                            if s.to_string_lossy().starts_with("socket:[") {
+                                let path = entry.path();
+                                let mut split: Vec<&str> = path
+                                    .to_str()
+                                    .unwrap()
+                                    .strip_prefix("/proc/")
+                                    .unwrap()
+                                    .split("/")
+                                    .collect();
 
-                            out.insert(split[0].to_string(), s);
+                                out.insert(split[0].to_string(), s);
+                            }
                         }
                     }
                 }
@@ -140,60 +144,61 @@ pub fn get_process_name(pid: &str) -> anyhow::Result<String> {
     Ok(out.trim_start().trim_end().to_string())
 }
 
-pub fn parse_proc_net_tcp() -> anyhow::Result<Vec<TcpEvent>> {
-    let mut file = File::open("/proc/net/tcp")?;
-    let mut content = String::new();
-    let mut reader = BufReader::new(file);
-    let mut tcp_events = Vec::new();
-    let mut pid_map = build_pid_map()?;
+pub async fn parse_proc_net_tcp(sender: UnboundedSender<EvenType>) -> anyhow::Result<()> {
+    loop {
+        let mut pid_map = build_pid_map()?;
+        let mut file = File::open("/proc/net/tcp")?;
+        let mut reader = BufReader::new(file);
+        for line in reader.lines().skip(1) {
+            let line = line?;
+            let mut fs: Vec<&str> = line.trim().split_whitespace().collect();
+            let (local_ip, local_port) = parse_ip(fs[1])?;
+            let (remote_ip, remote_port) = parse_ip(fs[2])?;
+            let state = u64::from_str_radix(fs[3], 16)?;
+            let tcp_state = tcp_state_name(state);
+            let (tx_queue, rx_queue) = parse_queue(fs[4])?;
+            let time_stamp = if tcp_state == TcpState::Established {
+                Utc::now().timestamp_millis()
+            } else {
+                continue;
+            };
 
-    for line in reader.lines().skip(1) {
-        let line = line?;
-        let mut fs: Vec<&str> = line.trim().split_whitespace().collect();
-        let (local_ip, local_port) = parse_ip(fs[1])?;
-        let (remote_ip, remote_port) = parse_ip(fs[2])?;
-        let state = u64::from_str_radix(fs[3], 16)?;
-        let tcp_state = tcp_state_name(state);
-        let (tx_queue, rx_queue) = parse_queue(fs[4])?;
-        let time_stamp = if tcp_state == TcpState::Established {
-            Utc::now().timestamp_millis()
-        } else {
-            continue;
-        };
+            let (mut pid, mut process_name) = (None, None);
 
-        let (mut pid, mut process_name) = (None, None);
+            // this is expensive.
+            if let Some(s) = pid_map
+                .iter()
+                .find(|s| s.1.to_string_lossy().contains(fs[9]))
+            {
+                pid = Some(s.0.parse::<u32>().unwrap());
+                process_name = Some(get_process_name(s.0)?);
+            }
 
-        if let Some(s) = pid_map
-            .iter()
-            .find(|s| s.1.to_string_lossy().contains(fs[9]))
-        {
-            pid = Some(s.0.parse::<u32>().unwrap());
-            process_name = Some(get_process_name(s.0)?);
+            let tcp_ev = TcpEvent {
+                local_ip,
+                local_port,
+                remote_ip,
+                remote_port,
+                state: tcp_state,
+                tx_queue,
+                rx_queue,
+                timestamp: time_stamp,
+                pid,
+                process_name,
+            };
+            sender.send(EvenType::TcpEvent(tcp_ev));
         }
-
-        let tcp_ev = TcpEvent {
-            local_ip,
-            local_port,
-            remote_ip,
-            remote_port,
-            state: tcp_state,
-            tx_queue,
-            rx_queue,
-            timestamp: time_stamp,
-            pid,
-            process_name,
-        };
-        tcp_events.push(tcp_ev);
+        println!("Sleeping `5`s..");
+        sleep(Duration::from_secs(5)).await;
     }
 
-    Ok(tcp_events)
+    Ok(())
 }
 
-pub fn parse_net_udp() -> anyhow::Result<Vec<UdpEvent>> {
+pub async fn parse_net_udp(sender: UnboundedSender<EvenType>) -> anyhow::Result<()> {
     let mut pid_map = build_pid_map()?;
     let mut file = File::open("/proc/net/udp")?;
     let mut reader = BufReader::new(&mut file);
-    let mut udp_ev = Vec::new();
 
     for line in reader.lines().skip(1) {
         let line = line?;
@@ -222,35 +227,16 @@ pub fn parse_net_udp() -> anyhow::Result<Vec<UdpEvent>> {
             timestamp: time_stamp,
         };
 
-        udp_ev.push(ev);
+        sender.send(EvenType::UdpEvent(ev));
     }
 
-    Ok(udp_ev)
+    Ok(())
 }
 
 #[derive(Serialize, Debug)]
 pub enum EvenType {
     TcpEvent(TcpEvent),
     UdpEvent(UdpEvent),
-}
-
-pub async fn connect_kafka(data: Vec<u8>, topic_name: &str, key: &str) -> anyhow::Result<()> {
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", "192.168.1.8:9092")
-        .create()
-        .unwrap();
-
-    producer
-        .send(
-            FutureRecord::to(topic_name).payload(&data).key(key),
-            Duration::from_secs(0),
-        )
-        .await
-        .unwrap();
-
-    println!("Done bruh");
-
-    Ok(())
 }
 
 pub fn serialize_data(ev_type: EvenType) -> anyhow::Result<Vec<u8>> {
