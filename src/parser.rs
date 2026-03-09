@@ -2,8 +2,11 @@
 use anyhow::{Error, anyhow};
 use avro_rs::{Reader, Writer, schema, types::Record};
 use chrono::{DateTime, Utc};
+use rdkafka::ClientConfig;
 use rdkafka::producer::Producer;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde::Serialize;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     fs::{self, File, read_link},
@@ -18,25 +21,25 @@ use std::{
 
 #[derive(Debug, Serialize)]
 pub struct TcpEvent {
-    timestamp: i64,
-    local_ip: String,
-    local_port: u16,
-    remote_ip: String,
-    remote_port: u16,
-    state: TcpState,
-    pid: Option<u32>,
-    process_name: Option<String>,
-    tx_queue: u32,
-    rx_queue: u32,
+    pub timestamp: i64,
+    pub local_ip: String,
+    pub local_port: u16,
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub state: TcpState,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
+    pub tx_queue: u32,
+    pub rx_queue: u32,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UdpEvent {
-    timestamp: i64,
-    local_ip: String,
-    local_port: u16,
-    pid: Option<u32>,
-    process_name: Option<String>,
+    pub timestamp: i64,
+    pub local_ip: String,
+    pub local_port: u16,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -231,12 +234,32 @@ pub enum EvenType {
     UdpEvent(UdpEvent),
 }
 
-pub fn serialize_data(ev: TcpEvent) -> anyhow::Result<Vec<u8>> {
-    let raw_schema = r#"
-    {
+pub async fn connect_kafka(data: Vec<u8>, topic_name: &str, key: &str) -> anyhow::Result<()> {
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", "192.168.1.8:9092")
+        .create()
+        .unwrap();
+
+    producer
+        .send(
+            FutureRecord::to(topic_name).payload(&data).key(key),
+            Duration::from_secs(0),
+        )
+        .await
+        .unwrap();
+
+    println!("Done bruh");
+
+    Ok(())
+}
+
+pub fn serialize_data(ev_type: EvenType) -> anyhow::Result<Vec<u8>> {
+    let raw_schema = match ev_type {
+        EvenType::TcpEvent(ref ev) => {
+            r#"
+         {
     "type": "record",
     "name": "TcpEvent",
-    "namespace": "watch-watch.network",
     "fields": [
         {
         "name": "timestamp",
@@ -299,10 +322,54 @@ pub fn serialize_data(ev: TcpEvent) -> anyhow::Result<Vec<u8>> {
         }
     ]
     }
-        "#;
+        "#
+        }
+        EvenType::UdpEvent(ref ev) => {
+            r#"
+{
+  "type": "record",
+  "name": "UdpEvent",
+  "namespace": "watch-watch.network",
+  "fields": [
+    {
+      "name": "timestamp",
+      "type": "long"
+    },
+    {
+      "name": "local_ip",
+      "type": "string"
+    },
+    {
+      "name": "local_port",
+      "type": "int"
+    },
+    {
+      "name": "pid",
+      "type": ["null", "int"],
+      "default": null
+    },
+    {
+      "name": "process_name",
+      "type": ["null", "string"],
+      "default": null
+    }
+  ]
+}
+"#
+        }
+    };
     let schema = avro_rs::Schema::parse_str(raw_schema).unwrap();
     let mut writer = Writer::new(&schema, Vec::new());
-    let s = writer.append_ser(ev)?;
-    let input = writer.into_inner()?;
-    Ok(input)
+    match ev_type {
+        EvenType::TcpEvent(ev) => {
+            let s = writer.append_ser(ev)?;
+            let input = writer.into_inner()?;
+            return Ok(input);
+        }
+        EvenType::UdpEvent(ev) => {
+            let s = writer.append_ser(ev)?;
+            let input = writer.into_inner()?;
+            return Ok(input);
+        }
+    }
 }

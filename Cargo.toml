@@ -8,4 +8,5 @@ anyhow = "1.0.102"
 avro-rs = "0.13.0"
 chrono = "0.4.44"
 serde = { version = "1.0.228", features = ["derive"] }
-rdkafka = { version = "0.25", features = ["cmake-build"] }
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+tokio = { version = "1", features = ["full"] }
