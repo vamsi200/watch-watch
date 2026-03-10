@@ -19,7 +19,6 @@ async fn refresh_pid_map(map: PidMap) -> anyhow::Result<()> {
             let mut guard = map.write().unwrap();
             *guard = new_map;
         }
-        println!("Refreshing Pid map every `30`s");
         sleep(Duration::from_secs(30));
     }
 }

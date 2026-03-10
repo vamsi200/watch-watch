@@ -6,6 +6,7 @@ use rdkafka::ClientConfig;
 use rdkafka::producer::Producer;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde::Serialize;
+use serde_json::Serializer;
 use std::os::unix::fs::MetadataExt;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -202,8 +203,8 @@ pub async fn parse_proc_net_tcp(
             };
             sender.send(EvenType::TcpEvent(tcp_ev));
         }
-        println!("Tcp channel Sleeping `5`s..");
-        sleep(Duration::from_secs(5)).await;
+        println!("Tcp channel Sleeping `60`s..");
+        sleep(Duration::from_secs(60)).await;
     }
 
     Ok(())
@@ -246,8 +247,8 @@ pub async fn parse_net_udp(
 
             sender.send(EvenType::UdpEvent(ev));
         }
-        println!("Udp channel Sleeping `5`s..");
-        sleep(Duration::from_secs(5)).await;
+        println!("Udp channel Sleeping `60`s..");
+        sleep(Duration::from_secs(60)).await;
     }
     Ok(())
 }
@@ -259,122 +260,10 @@ pub enum EvenType {
 }
 
 pub fn serialize_data(ev_type: EvenType) -> anyhow::Result<Vec<u8>> {
-    let raw_schema = match ev_type {
-        EvenType::TcpEvent(ref ev) => {
-            r#"
-         {
-    "type": "record",
-    "name": "TcpEvent",
-    "fields": [
-        {
-        "name": "timestamp",
-        "type": "long"
-        },
-        {
-        "name": "local_ip",
-        "type": "string"
-        },
-        {
-        "name": "local_port",
-        "type": "int"
-        },
-        {
-        "name": "remote_ip",
-        "type": "string"
-        },
-        {
-        "name": "remote_port",
-        "type": "int"
-        },
-        {
-        "name": "state",
-        "type": {
-            "type": "enum",
-            "name": "TcpState",
-            "symbols": [
-            "Established",
-            "SynSent",
-            "SynRecv",
-            "FinWait1",
-            "FinWait2",
-            "TimeWait",
-            "Close",
-            "CloseWait",
-            "LastAck",
-            "Listen",
-            "Closing",
-            "Unknown"
-            ]
-        }
-        },
-        {
-        "name": "pid",
-        "type": ["null", "int"],
-        "default": null
-        },
-        {
-        "name": "process_name",
-        "type": ["null", "string"],
-        "default": null
-        },
-        {
-        "name": "tx_queue",
-        "type": "int"
-        },
-        {
-        "name": "rx_queue",
-        "type": "int"
-        }
-    ]
-    }
-        "#
-        }
-        EvenType::UdpEvent(ref ev) => {
-            r#"
-{
-  "type": "record",
-  "name": "UdpEvent",
-  "namespace": "watch-watch.network",
-  "fields": [
-    {
-      "name": "timestamp",
-      "type": "long"
-    },
-    {
-      "name": "local_ip",
-      "type": "string"
-    },
-    {
-      "name": "local_port",
-      "type": "int"
-    },
-    {
-      "name": "pid",
-      "type": ["null", "int"],
-      "default": null
-    },
-    {
-      "name": "process_name",
-      "type": ["null", "string"],
-      "default": null
-    }
-  ]
-}
-"#
-        }
+    let json_str = match ev_type {
+        EvenType::TcpEvent(ev) => serde_json::to_string(&ev)?,
+        EvenType::UdpEvent(ev) => serde_json::to_string(&ev)?,
     };
-    let schema = avro_rs::Schema::parse_str(raw_schema).unwrap();
-    let mut writer = Writer::new(&schema, Vec::new());
-    match ev_type {
-        EvenType::TcpEvent(ev) => {
-            let s = writer.append_ser(ev)?;
-            let input = writer.into_inner()?;
-            return Ok(input);
-        }
-        EvenType::UdpEvent(ev) => {
-            let s = writer.append_ser(ev)?;
-            let input = writer.into_inner()?;
-            return Ok(input);
-        }
-    }
+
+    Ok(json_str.into_bytes())
 }
