@@ -1,11 +1,10 @@
 #![allow(unused)]
 use anyhow::{Error, anyhow};
-use avro_rs::{Reader, Writer, schema, types::Record};
 use chrono::{DateTime, Utc};
 use rdkafka::ClientConfig;
 use rdkafka::producer::Producer;
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Serializer;
 use std::os::unix::fs::MetadataExt;
 use std::sync::{Arc, RwLock};
@@ -24,7 +23,7 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::sleep;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TcpEvent {
     pub timestamp: i64,
     pub local_ip: String,
@@ -38,7 +37,19 @@ pub struct TcpEvent {
     pub rx_queue: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Deserialize, Debug)]
+pub struct TcpWrapper {
+    #[serde(rename = "TcpEvent")]
+    pub tcp_event: TcpEvent,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct UdpWrapper {
+    #[serde(rename = "UdpEvent")]
+    pub udp_event: UdpEvent,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UdpEvent {
     pub timestamp: i64,
     pub local_ip: String,
@@ -47,7 +58,7 @@ pub struct UdpEvent {
     pub process_name: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum TcpState {
     Established,
     Listen,
@@ -130,10 +141,8 @@ pub fn build_pid_map() -> anyhow::Result<HashMap<u64, u32>> {
 
         for fd in fs::read_dir(fd_dir)? {
             let fd = fd?;
-
             if let Ok(target) = fs::read_link(fd.path()) {
                 let s = target.to_string_lossy();
-
                 if let Some(inode_str) =
                     s.strip_prefix("socket:[").and_then(|v| v.strip_suffix("]"))
                 {
@@ -203,8 +212,8 @@ pub async fn parse_proc_net_tcp(
             };
             sender.send(EvenType::TcpEvent(tcp_ev));
         }
-        println!("Tcp channel Sleeping `60`s..");
-        sleep(Duration::from_secs(60)).await;
+        // println!("Tcp channel Sleeping `60`s..");
+        // sleep(Duration::from_secs(60)).await;
     }
 
     Ok(())
@@ -247,8 +256,8 @@ pub async fn parse_net_udp(
 
             sender.send(EvenType::UdpEvent(ev));
         }
-        println!("Udp channel Sleeping `60`s..");
-        sleep(Duration::from_secs(60)).await;
+        // println!("Udp channel Sleeping `60`s..");
+        // sleep(Duration::from_secs(60)).await;
     }
     Ok(())
 }
@@ -260,10 +269,5 @@ pub enum EvenType {
 }
 
 pub fn serialize_data(ev_type: EvenType) -> anyhow::Result<Vec<u8>> {
-    let json_str = match ev_type {
-        EvenType::TcpEvent(ev) => serde_json::to_string(&ev)?,
-        EvenType::UdpEvent(ev) => serde_json::to_string(&ev)?,
-    };
-
-    Ok(json_str.into_bytes())
+    Ok(serde_json::to_vec(&ev_type)?)
 }
