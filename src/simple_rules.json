@@ -1,0 +1,32 @@
+[
+  {
+    "name": "SSH External Access",
+    "severity": "Critical",
+    "rule_type": "RemotePort",
+    "threshold": 22
+  },
+  {
+    "name": "FTP Access",
+    "severity": "High",
+    "rule_type": "RemotePort",
+    "threshold": 21
+  },
+  {
+    "name": "SMTP Access",
+    "severity": "Medium",
+    "rule_type": "RemotePort",
+    "threshold": 25
+  },
+  {
+    "name": "HTTP Access",
+    "severity": "Low",
+    "rule_type": "RemotePort",
+    "threshold": 80
+  },
+  {
+    "name": "HTTPS Access",
+    "severity": "Low",
+    "rule_type": "RemotePort",
+    "threshold": 443
+  }
+]

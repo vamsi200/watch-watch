@@ -1,6 +1,7 @@
 #![allow(unused)]
 use anyhow::{Error, anyhow};
 use chrono::{DateTime, Utc};
+use clap::builder::Str;
 use rdkafka::ClientConfig;
 use rdkafka::producer::Producer;
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -25,7 +26,6 @@ use tokio::time::sleep;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TcpEvent {
-    pub timestamp: i64,
     pub local_ip: String,
     pub local_port: u16,
     pub remote_ip: String,
@@ -51,7 +51,6 @@ pub struct UdpWrapper {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UdpEvent {
-    pub timestamp: i64,
     pub local_ip: String,
     pub local_port: u16,
     pub pid: Option<u32>,
@@ -184,7 +183,7 @@ pub async fn parse_proc_net_tcp(
             let tcp_state = tcp_state_name(state);
             let (tx_queue, rx_queue) = parse_queue(fs[4])?;
             let time_stamp = if tcp_state == TcpState::Established {
-                Utc::now().timestamp_millis()
+                Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
             } else {
                 continue;
             };
@@ -206,7 +205,6 @@ pub async fn parse_proc_net_tcp(
                 state: tcp_state,
                 tx_queue,
                 rx_queue,
-                timestamp: time_stamp,
                 pid,
                 process_name,
             };
@@ -235,7 +233,6 @@ pub async fn parse_net_udp(
             let state = u64::from_str_radix(fs[3], 16)?;
             let tcp_state = tcp_state_name(state);
             let (tx_queue, rx_queue) = parse_queue(fs[4])?;
-            let time_stamp = Utc::now().timestamp_millis();
 
             let (mut pid, mut process_name) = (None, None);
 
@@ -251,7 +248,6 @@ pub async fn parse_net_udp(
                 local_port,
                 pid,
                 process_name,
-                timestamp: time_stamp,
             };
 
             sender.send(EvenType::UdpEvent(ev));
