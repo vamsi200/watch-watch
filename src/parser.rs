@@ -233,7 +233,6 @@ pub async fn parse_net_udp(
             let state = u64::from_str_radix(fs[3], 16)?;
             let tcp_state = tcp_state_name(state);
             let (tx_queue, rx_queue) = parse_queue(fs[4])?;
-
             let (mut pid, mut process_name) = (None, None);
 
             let inode = fs[9].parse::<u64>()?;

@@ -1,7 +1,9 @@
 #![allow(unused)]
+use std::collections::VecDeque;
+
 use crate::{
     parser::{EvenType, TcpEvent, TcpState, TcpWrapper, UdpEvent, UdpWrapper},
-    rules::{apply_rules_tcp, load_rules},
+    rules::{Alert, apply_simple_rules_tcp, load_rules},
 };
 use anyhow::Context;
 use rdkafka::{
@@ -29,13 +31,15 @@ pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow:
         .set("bootstrap.servers", "192.168.1.9:9092")
         .create()
         .unwrap();
+    let mut state: VecDeque<Alert> = VecDeque::new();
 
     loop {
         match consumer.recv().await {
             Ok(msg) => {
                 if let Some(msg) = msg.payload() {
                     if let Ok(data) = serde_json::from_slice::<TcpWrapper>(msg) {
-                        apply_rules_tcp(data.tcp_event, &rules, &producer).await?;
+                        apply_simple_rules_tcp(data.tcp_event, &rules, &producer, &mut state)
+                            .await?;
                     } else if let Ok(data) = serde_json::from_slice::<UdpWrapper>(msg) {
                     }
                 }

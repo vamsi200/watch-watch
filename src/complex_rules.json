@@ -1,0 +1,7 @@
+{
+  "name": "SSH Brute Force",
+  "operator": "Count",
+  "group_by": "remote_ip",
+  "threshold": 5,
+  "window": 10
+}

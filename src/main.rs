@@ -3,7 +3,7 @@
 use clap::Parser;
 use rdkafka::ClientConfig;
 use rdkafka::producer::FutureProducer;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
@@ -13,7 +13,9 @@ use watch_watch::parser::{
     self, EvenType, PidMap, TcpEvent, UdpEvent, build_pid_map, serialize_data,
 };
 use watch_watch::producer::connect_kafka;
-use watch_watch::rules::{apply_rules_tcp, load_rules};
+use watch_watch::rules::{
+    Alert, apply_simple_rules_tcp, load_complex_rules, load_rules, process_event,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
