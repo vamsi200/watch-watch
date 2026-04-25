@@ -13,9 +13,7 @@ use watch_watch::parser::{
     self, EvenType, PidMap, TcpEvent, UdpEvent, build_pid_map, serialize_data,
 };
 use watch_watch::producer::connect_kafka;
-use watch_watch::rules::{
-    Alert, apply_simple_rules_tcp, load_complex_rules, load_rules, process_event,
-};
+use watch_watch::rules::{Alert, apply_simple_rules_tcp, laod_rules};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -53,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     if args.producer {
         println!("Starting the producer..");
         let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", "192.168.1.9:9092")
+            .set("bootstrap.servers", "192.168.1.7:9092")
             .create()
             .unwrap();
 

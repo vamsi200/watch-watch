@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 use crate::{
     parser::{EvenType, TcpEvent, TcpState, TcpWrapper, UdpEvent, UdpWrapper},
-    rules::{Alert, apply_simple_rules_tcp, load_rules},
+    rules::{Alert, apply_simple_rules_tcp, laod_rules},
 };
 use anyhow::Context;
 use rdkafka::{
@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow::Error> {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("group.id", "ids")
-        .set("bootstrap.servers", "192.168.1.9:9092")
+        .set("bootstrap.servers", "192.168.1.7:9092")
         .set("auto.offset.reset", "earliest")
         .create()
         .with_context(|| "Failed to create consumer")?;
@@ -26,9 +26,9 @@ pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow:
         .subscribe(&topic_name)
         .with_context(|| "Failed to subscribe to events");
 
-    let rules = load_rules()?;
+    let rules = laod_rules()?;
     let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", "192.168.1.9:9092")
+        .set("bootstrap.servers", "192.168.1.7:9092")
         .create()
         .unwrap();
     let mut state: VecDeque<Alert> = VecDeque::new();
@@ -38,7 +38,7 @@ pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow:
             Ok(msg) => {
                 if let Some(msg) = msg.payload() {
                     if let Ok(data) = serde_json::from_slice::<TcpWrapper>(msg) {
-                        apply_simple_rules_tcp(data.tcp_event, &rules, &producer, &mut state)
+                        apply_simple_rules_tcp(&rules, data.tcp_event, &producer, &mut state)
                             .await?;
                     } else if let Ok(data) = serde_json::from_slice::<UdpWrapper>(msg) {
                     }
