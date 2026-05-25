@@ -13,7 +13,7 @@ use watch_watch::parser::{
     self, EvenType, PidMap, TcpEvent, UdpEvent, build_pid_map, serialize_data,
 };
 use watch_watch::producer::connect_kafka;
-use watch_watch::rules::{Alert, apply_simple_rules_tcp, laod_rules};
+use watch_watch::rules::{Alert, laod_rules};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

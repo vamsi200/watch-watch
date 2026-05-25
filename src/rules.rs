@@ -1,6 +1,6 @@
 #![allow(unused)]
 use crate::{
-    parser::{EvenType, TcpEvent, TcpState, serialize_data},
+    parser::{EvenType, TcpEvent, TcpState, UdpEvent, serialize_data},
     producer::connect_kafka,
 };
 use anyhow::Error;
@@ -16,30 +16,142 @@ use std::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+#[derive(Deserialize, Debug)]
+pub struct RawRule {
+    name: String,
+    severity: Severity,
+
+    #[serde(rename = "match")]
+    matcher: HashMap<String, serde_json::Value>,
+
+    correlate: Option<CorrelationRule>,
+    category: RuleCategory,
+}
 #[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Rule {
     name: String,
     severity: Severity,
     #[serde(rename = "match")]
-    matcher: HashMap<String, serde_json::Value>,
+    matcher: Vec<CompiledMatcher>,
     correlate: Option<CorrelationRule>,
+    category: RuleCategory,
 }
 
 #[derive(Deserialize, Debug, Clone, Serialize)]
-pub struct Alert {
+struct CompiledMatcher {
+    field: CompiledField,
+    expected: FieldValue,
+}
+
+impl CompiledMatcher {
+    fn matches(&self, event: &TcpEvent) -> bool {
+        self.field.get(event) == self.expected
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, Serialize)]
+pub struct Alert<'a> {
     #[serde(rename = "@timestamp")]
     timestamp: String,
-    name: String,
+    name: &'a str,
     severity: Severity,
     threshold: usize,
     event: Value,
 }
 
+#[derive(Deserialize, Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CompiledField {
+    RemotePort,
+    LocalPort,
+    TxQueue,
+    RxQueue,
+    State,
+    ProcessName,
+    LocalIp,
+    RemoteIp,
+    Pid,
+}
+
+#[derive(Deserialize, Debug, Clone, Serialize, PartialEq)]
+enum FieldValue {
+    String(String),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    Bool(bool),
+    Enum(String),
+    None,
+}
+
+impl CompiledField {
+    fn get<'a>(&self, event: &'a TcpEvent) -> FieldValue {
+        match self {
+            CompiledField::RemotePort => FieldValue::U16(event.remote_port),
+            CompiledField::LocalPort => FieldValue::U16(event.local_port),
+            CompiledField::TxQueue => FieldValue::U32(event.tx_queue),
+            CompiledField::RxQueue => FieldValue::U32(event.tx_queue),
+            CompiledField::RemoteIp => FieldValue::String(event.remote_ip.to_string()),
+            CompiledField::ProcessName => {
+                if let Some(ev) = &event.process_name {
+                    FieldValue::String(ev.to_string())
+                } else {
+                    FieldValue::None
+                }
+            }
+            CompiledField::State => FieldValue::Enum(event.state.to_string()),
+            CompiledField::LocalIp => FieldValue::String(event.local_ip.to_string()),
+            CompiledField::Pid => {
+                if let Some(ev) = event.pid {
+                    FieldValue::U32(ev)
+                } else {
+                    FieldValue::None
+                }
+            }
+        }
+    }
+}
+
+impl TryFrom<RawRule> for Rule {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawRule) -> anyhow::Result<Self> {
+        let mut compiled = Vec::new();
+
+        for (field, value) in raw.matcher {
+            let field = match field.as_str() {
+                "remote_port" => CompiledField::RemotePort,
+                "local_port" => CompiledField::LocalPort,
+                "tx_queue" => CompiledField::TxQueue,
+                "rx_queue" => CompiledField::RxQueue,
+                "pid" => CompiledField::Pid,
+                "remote_ip" => CompiledField::RemoteIp,
+                "local_ip" => CompiledField::LocalIp,
+                _ => anyhow::bail!("unknown field: {}", field),
+            };
+
+            let expected = match value {
+                serde_json::Value::Number(n) => FieldValue::U64(n.as_u64().unwrap()),
+                serde_json::Value::String(s) => FieldValue::String(s),
+                _ => anyhow::bail!("unsupported value type"),
+            };
+
+            compiled.push(CompiledMatcher { field, expected });
+        }
+
+        Ok(Self {
+            name: raw.name,
+            severity: raw.severity,
+            matcher: compiled,
+            correlate: raw.correlate,
+            category: raw.category,
+        })
+    }
+}
+
 impl Rule {
-    fn matches(&self, event: &Value) -> bool {
-        self.matcher
-            .iter()
-            .all(|(field, val)| event.get(field).map_or(false, |s| s == val))
+    fn matches(&self, event: &TcpEvent) -> bool {
+        self.matcher.iter().all(|m| m.matches(event))
     }
 
     fn group_key(&self, event: &Value) -> Option<String> {
@@ -59,7 +171,7 @@ pub struct CorrelationState {
 }
 
 impl CorrelationState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             windows: HashMap::new(),
         }
@@ -79,11 +191,10 @@ impl CorrelationState {
             .ok_or_else(|| anyhow::anyhow!("missing or invalid timestamp"))?;
 
         let window_ms = correlate.window_secs * 1_000;
-        let mut entry = self
+        let entry = self
             .windows
             .entry((rule.name.clone(), group_key.to_string()))
-            .or_default()
-            .clone();
+            .or_default();
 
         while let Some(front) = entry.front() {
             if (now - front.timestamp_ms) as u64 > window_ms {
@@ -98,10 +209,10 @@ impl CorrelationState {
             event: event.clone(),
         });
 
-        Ok(self.evaluate(correlate, &entry))
+        Ok(Self::evaluate(correlate, &entry))
     }
 
-    fn evaluate(&self, correlate: &CorrelationRule, entry: &VecDeque<WindowEntry>) -> bool {
+    fn evaluate(correlate: &CorrelationRule, entry: &VecDeque<WindowEntry>) -> bool {
         match correlate.operator {
             CorrelationOperator::Count => entry.len() >= correlate.threshold,
 
@@ -173,6 +284,20 @@ enum Severity {
     Critical,
 }
 
+#[derive(Deserialize, Debug, Serialize, Clone)]
+enum RuleCategory {
+    Recon,
+    Persistence,
+    LateralMovement,
+    Exfiltration,
+    PrivEsc,
+}
+
+enum RuleStatus {
+    Enable,
+    Disable,
+}
+
 impl Severity {
     fn to_str(&self) -> &str {
         match self {
@@ -188,42 +313,42 @@ pub fn laod_rules() -> anyhow::Result<Vec<Rule>, anyhow::Error> {
     let mut content = String::new();
     file.read_to_string(&mut content);
 
-    let data = if let Ok(data) = serde_json::from_str::<Vec<Rule>>(&content) {
-        data
-    } else {
-        panic!("invalid json - complex_rules")
-    };
+    let raw_rules: Vec<RawRule> = serde_json::from_str(&content)?;
 
-    Ok(data)
+    let rules: Vec<Rule> = raw_rules
+        .into_iter()
+        .map(Rule::try_from)
+        .collect::<Result<_, _>>()?;
+
+    Ok(rules)
 }
 
-pub async fn apply_simple_rules_tcp(
+pub async fn apply_rules_tcp(
     rules: &Vec<Rule>,
     tcp_event: TcpEvent,
     producer: &FutureProducer,
-    state: &mut VecDeque<Alert>,
+    map: &mut CorrelationState,
 ) -> anyhow::Result<(), anyhow::Error> {
-    let mut map = CorrelationState::new();
+    let event = json!(tcp_event);
+
     for rule in rules {
-        if !rule.matches(&json!(tcp_event)) {
+        if !rule.matches(&tcp_event) {
             continue;
         }
-        let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
+        let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let key = rule.severity.to_str();
 
-        // this expensive??
-        let alert = Alert {
-            timestamp: timestamp,
-            name: rule.name.clone(),
-            threshold: 0,
-            event: json!(tcp_event),
-            severity: rule.severity.clone(),
-        };
+        if let Some(group_key) = rule.group_key(&event) {
+            if map.process(rule, &group_key, &event)? {
+                let alert = Alert {
+                    timestamp: timestamp,
+                    name: &rule.name,
+                    threshold: 0,
+                    event: json!(tcp_event),
+                    severity: rule.severity.clone(),
+                };
 
-        if let Some(cr) = &rule.correlate {
-            if map.process(rule, &cr.group_by, &json!(tcp_event))? {
-                println!("Sending alerts..");
                 let serialized_data = serde_json::to_vec(&alert)?;
                 connect_kafka(serialized_data, "alerts.events", key, &producer)
                     .await
@@ -233,42 +358,6 @@ pub async fn apply_simple_rules_tcp(
     }
 
     Ok(())
-}
-
-#[test]
-fn stupid_test() {
-    let mut matcher: HashMap<String, serde_json::Value> = HashMap::new();
-    matcher.insert("remote_port".to_string(), json!(12));
-
-    let correlate = CorrelationRule {
-        group_by: "remote_port".to_string(),
-        operator: CorrelationOperator::Count,
-        threshold: 5,
-        window_secs: 10,
-        sum_field: None,
-        steps: None,
-    };
-    let rule = Rule {
-        name: String::from("test"),
-        severity: Severity::Medium,
-        correlate: Some(correlate),
-        matcher,
-    };
-
-    let value = json!(TcpEvent {
-        local_ip: String::from("127.0.0.1"),
-        local_port: 22,
-        remote_ip: "10".to_string(),
-        remote_port: 12,
-        state: TcpState::Established,
-        pid: None,
-        process_name: None,
-        tx_queue: 10,
-        rx_queue: 32,
-    });
-
-    assert_ne!(rule.group_key(&json!(value)), None);
-    assert_eq!(rule.matches(&json!(value)), true);
 }
 
 #[test]

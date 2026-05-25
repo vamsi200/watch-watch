@@ -73,6 +73,26 @@ pub enum TcpState {
     Unknown,
 }
 
+impl TcpState {
+    pub fn to_string(&self) -> String {
+        match self {
+            TcpState::Established => "ESTABLISHED",
+            TcpState::Listen => "LISTEN",
+            TcpState::SynSent => "SYN_SENT",
+            TcpState::SynRecv => "SYN_RECV",
+            TcpState::FinWait1 => "FIN_WAIT1",
+            TcpState::FinWait2 => "FIN_WAIT2",
+            TcpState::Close => "CLOSE",
+            TcpState::CloseWait => "CLOSE_WAIT",
+            TcpState::LastAck => "LAST_ACK",
+            TcpState::TimeWait => "TIME_WAIT",
+            TcpState::Closing => "CLOSING",
+            TcpState::Unknown => "UNKNOWN",
+        }
+        .to_string()
+    }
+}
+
 pub fn tcp_state_name(state: u64) -> TcpState {
     match state {
         0x01 => TcpState::Established,

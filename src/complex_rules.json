@@ -1,7 +1,46 @@
-{
-  "name": "SSH Brute Force",
-  "operator": "Count",
-  "group_by": "remote_ip",
-  "threshold": 5,
-  "window": 10
-}
+[
+  {
+    "name": "SSH Brute Force",
+    "severity": "Critical",
+    "match": {
+      "remote_port": 8080
+    },
+    "correlate": {
+      "group_by": "remote_ip",
+      "operator": "Count",
+      "threshold": 5,
+      "window_secs": 1
+    },
+    "category": "Recon"
+  },
+  {
+    "name": "Port Scan Detection",
+    "severity": "High",
+    "match": {
+      "remote_ip": "192.168.1.100"
+    },
+    "correlate": {
+      "group_by": "remote_port",
+      "operator": "Unique",
+      "threshold": 10,
+      "window_secs": 30
+    },
+    "category": "Recon"
+  },
+  {
+    "name": "HTTPS Access",
+    "severity": "Low",
+    "match": {
+      "remote_port": 443
+    },
+    "category": "Recon"
+  },
+  {
+    "name": "HTTP Access",
+    "severity": "Low",
+    "match": {
+      "remote_port": 80
+    },
+    "category": "Recon"
+  }
+]

@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 use crate::{
     parser::{EvenType, TcpEvent, TcpState, TcpWrapper, UdpEvent, UdpWrapper},
-    rules::{Alert, apply_simple_rules_tcp, laod_rules},
+    rules::{Alert, CorrelationState, apply_rules_tcp, laod_rules},
 };
 use anyhow::Context;
 use rdkafka::{
@@ -15,6 +15,7 @@ use serde_json::{Map, from_value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow::Error> {
+    println!("Starting the consumer..");
     let consumer: StreamConsumer = ClientConfig::new()
         .set("group.id", "ids")
         .set("bootstrap.servers", "192.168.1.7:9092")
@@ -31,15 +32,14 @@ pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow:
         .set("bootstrap.servers", "192.168.1.7:9092")
         .create()
         .unwrap();
-    let mut state: VecDeque<Alert> = VecDeque::new();
+    let mut map = CorrelationState::new();
 
     loop {
         match consumer.recv().await {
             Ok(msg) => {
                 if let Some(msg) = msg.payload() {
                     if let Ok(data) = serde_json::from_slice::<TcpWrapper>(msg) {
-                        apply_simple_rules_tcp(&rules, data.tcp_event, &producer, &mut state)
-                            .await?;
+                        apply_rules_tcp(&rules, data.tcp_event, &producer, &mut map).await?;
                     } else if let Ok(data) = serde_json::from_slice::<UdpWrapper>(msg) {
                     }
                 }
