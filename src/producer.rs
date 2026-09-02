@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::parser::EvenType;
+use crate::parser::EventType;
 use rdkafka::{
     ClientConfig,
     producer::{FutureProducer, FutureRecord},

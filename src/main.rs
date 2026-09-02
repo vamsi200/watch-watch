@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use bpfx::{Bpfx, NetworkFilter};
 use clap::Parser;
 use rdkafka::ClientConfig;
 use rdkafka::producer::FutureProducer;
@@ -9,11 +10,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::sleep;
 use watch_watch::consumer::consume_events;
-use watch_watch::parser::{
-    self, EvenType, PidMap, TcpEvent, UdpEvent, build_pid_map, serialize_data,
-};
+use watch_watch::parser::{self, EventType, PidMap, serialize_data};
 use watch_watch::producer::connect_kafka;
-use watch_watch::rules::{Alert, laod_rules};
+use watch_watch::rules::Alert;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -25,26 +24,11 @@ pub struct Args {
     pub consumer: bool,
 }
 
-async fn refresh_pid_map(map: PidMap) -> anyhow::Result<()> {
-    println!("Refreshing Pid map..");
-    loop {
-        let new_map = build_pid_map()?;
-        {
-            let mut guard = map.write().unwrap();
-            *guard = new_map;
-        }
-        sleep(Duration::from_secs(30));
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
-    let (r_sender, mut r_receiver) = unbounded_channel::<TcpEvent>();
-
     if args.consumer {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<EvenType>();
-        let topic_list = vec!["tcp.events", "udp.events"];
+        let topic_list = vec!["connect", "accept", "close", "bind", "listen"];
         consume_events(topic_list).await.unwrap();
     }
 
@@ -55,29 +39,50 @@ async fn main() -> anyhow::Result<()> {
             .create()
             .unwrap();
 
-        let pid_map: PidMap = Arc::new(RwLock::new(HashMap::new()));
+        let (sender_tx, mut receiver_rx) = tokio::sync::mpsc::channel::<EventType>(1024);
 
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<EvenType>();
+        let mut bpfx = Bpfx::new()?;
+        let mut poll = bpfx.subscribe(NetworkFilter::ALL)?;
+        let _ = bpfx.run();
 
-        tokio::spawn(refresh_pid_map(pid_map.clone()));
-        tokio::spawn(parser::parse_proc_net_tcp(sender.clone(), pid_map.clone()));
-        tokio::spawn(parser::parse_net_udp(sender, pid_map));
+        tokio::spawn(parser::parse_proc_net_tcp(poll, sender_tx));
 
-        while let Some(event_type) = receiver.recv().await {
+        while let Some(event_type) = receiver_rx.recv().await {
             match event_type {
-                EvenType::TcpEvent(events) => {
-                    let key = events.local_ip.clone();
+                EventType::Connect(events) => {
+                    let key = events.endpoints.local_ip.to_string();
                     let serialized_data =
-                        serialize_data(parser::EvenType::TcpEvent(events)).unwrap();
-                    connect_kafka(serialized_data, "tcp.events", &key, &producer)
+                        serialize_data(parser::EventType::Connect(events)).unwrap();
+                    connect_kafka(serialized_data, "connect", &key, &producer)
                         .await
                         .unwrap();
                 }
-                EvenType::UdpEvent(events) => {
-                    let key = events.local_ip.clone();
+                EventType::Accept(events) => {
+                    let key = events.endpoints.local_ip.to_string();
+                    let serialized_data = serialize_data(EventType::Accept(events)).unwrap();
+                    connect_kafka(serialized_data, "accept", &key, &producer)
+                        .await
+                        .unwrap();
+                }
+                EventType::Close(events) => {
+                    let key = events.endpoints.local_ip.to_string();
+                    let serialized_data = serialize_data(parser::EventType::Close(events)).unwrap();
+                    connect_kafka(serialized_data, "close", &key, &producer)
+                        .await
+                        .unwrap();
+                }
+                EventType::Bind(events) => {
+                    let key = events.endpoints.local_ip.to_string();
+                    let serialized_data = serialize_data(parser::EventType::Bind(events)).unwrap();
+                    connect_kafka(serialized_data, "bind", &key, &producer)
+                        .await
+                        .unwrap();
+                }
+                EventType::Listen(events) => {
+                    let key = events.endpoints.local_ip.to_string();
                     let serialized_data =
-                        serialize_data(parser::EvenType::UdpEvent(events)).unwrap();
-                    connect_kafka(serialized_data, "udp.events", &key, &producer)
+                        serialize_data(parser::EventType::Listen(events)).unwrap();
+                    connect_kafka(serialized_data, "listen", &key, &producer)
                         .await
                         .unwrap();
                 }

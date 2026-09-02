@@ -2,8 +2,8 @@
 use std::collections::VecDeque;
 
 use crate::{
-    parser::{EvenType, TcpEvent, TcpState, TcpWrapper, UdpEvent, UdpWrapper},
-    rules::{Alert, CorrelationState, apply_rules_tcp, laod_rules},
+    parser::EventType,
+    rules::{Alert, CorrelationState},
 };
 use anyhow::Context;
 use rdkafka::{
@@ -27,7 +27,7 @@ pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow:
         .subscribe(&topic_name)
         .with_context(|| "Failed to subscribe to events");
 
-    let rules = laod_rules()?;
+    // let rules = laod_rules()?;
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", "192.168.1.7:9092")
         .create()
@@ -38,9 +38,8 @@ pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow:
         match consumer.recv().await {
             Ok(msg) => {
                 if let Some(msg) = msg.payload() {
-                    if let Ok(data) = serde_json::from_slice::<TcpWrapper>(msg) {
-                        apply_rules_tcp(&rules, data.tcp_event, &producer, &mut map).await?;
-                    } else if let Ok(data) = serde_json::from_slice::<UdpWrapper>(msg) {
+                    if let Ok(data) = serde_json::from_slice::<EventType>(msg) {
+                        // apply_rules_tcp(&rules, data.tcp_event, &producer, &mut map).await?;
                     }
                 }
             }

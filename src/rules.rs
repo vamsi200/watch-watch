@@ -1,6 +1,6 @@
 #![allow(unused)]
 use crate::{
-    parser::{EvenType, TcpEvent, TcpState, UdpEvent, serialize_data},
+    parser::{EventType, serialize_data},
     producer::connect_kafka,
 };
 use anyhow::Error;
@@ -13,6 +13,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs::File,
     io::{BufReader, Read},
+    ops::Deref,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -27,26 +28,14 @@ pub struct RawRule {
     correlate: Option<CorrelationRule>,
     category: RuleCategory,
 }
+
 #[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Rule {
     name: String,
     severity: Severity,
     #[serde(rename = "match")]
-    matcher: Vec<CompiledMatcher>,
     correlate: Option<CorrelationRule>,
     category: RuleCategory,
-}
-
-#[derive(Deserialize, Debug, Clone, Serialize)]
-struct CompiledMatcher {
-    field: CompiledField,
-    expected: FieldValue,
-}
-
-impl CompiledMatcher {
-    fn matches(&self, event: &TcpEvent) -> bool {
-        self.field.get(event) == self.expected
-    }
 }
 
 #[derive(Deserialize, Debug, Clone, Serialize)]
@@ -84,81 +73,7 @@ enum FieldValue {
     None,
 }
 
-impl CompiledField {
-    fn get<'a>(&self, event: &'a TcpEvent) -> FieldValue {
-        match self {
-            CompiledField::RemotePort => FieldValue::U16(event.remote_port),
-            CompiledField::LocalPort => FieldValue::U16(event.local_port),
-            CompiledField::TxQueue => FieldValue::U32(event.tx_queue),
-            CompiledField::RxQueue => FieldValue::U32(event.tx_queue),
-            CompiledField::RemoteIp => FieldValue::String(event.remote_ip.to_string()),
-            CompiledField::ProcessName => {
-                if let Some(ev) = &event.process_name {
-                    FieldValue::String(ev.to_string())
-                } else {
-                    FieldValue::None
-                }
-            }
-            CompiledField::State => FieldValue::Enum(event.state.to_string()),
-            CompiledField::LocalIp => FieldValue::String(event.local_ip.to_string()),
-            CompiledField::Pid => {
-                if let Some(ev) = event.pid {
-                    FieldValue::U32(ev)
-                } else {
-                    FieldValue::None
-                }
-            }
-        }
-    }
-}
-
-impl TryFrom<RawRule> for Rule {
-    type Error = anyhow::Error;
-
-    fn try_from(raw: RawRule) -> anyhow::Result<Self> {
-        let mut compiled = Vec::new();
-
-        for (field, value) in raw.matcher {
-            let field = match field.as_str() {
-                "remote_port" => CompiledField::RemotePort,
-                "local_port" => CompiledField::LocalPort,
-                "tx_queue" => CompiledField::TxQueue,
-                "rx_queue" => CompiledField::RxQueue,
-                "pid" => CompiledField::Pid,
-                "remote_ip" => CompiledField::RemoteIp,
-                "local_ip" => CompiledField::LocalIp,
-                _ => anyhow::bail!("unknown field: {}", field),
-            };
-
-            let expected = match value {
-                serde_json::Value::Number(n) => FieldValue::U64(n.as_u64().unwrap()),
-                serde_json::Value::String(s) => FieldValue::String(s),
-                _ => anyhow::bail!("unsupported value type"),
-            };
-
-            compiled.push(CompiledMatcher { field, expected });
-        }
-
-        Ok(Self {
-            name: raw.name,
-            severity: raw.severity,
-            matcher: compiled,
-            correlate: raw.correlate,
-            category: raw.category,
-        })
-    }
-}
-
-impl Rule {
-    fn matches(&self, event: &TcpEvent) -> bool {
-        self.matcher.iter().all(|m| m.matches(event))
-    }
-
-    fn group_key(&self, event: &Value) -> Option<String> {
-        let field = &self.correlate.as_ref()?.group_by;
-        event.get(field).map(|v| v.to_string())
-    }
-}
+impl Rule {}
 
 #[derive(Debug, Clone)]
 pub struct WindowEntry {
@@ -308,60 +223,24 @@ impl Severity {
         }
     }
 }
-pub fn laod_rules() -> anyhow::Result<Vec<Rule>, anyhow::Error> {
-    let mut file = File::open("/home/vamsi/scripts/watch-watch/src/complex_rules.json")?;
-    let mut content = String::new();
-    file.read_to_string(&mut content);
 
-    let raw_rules: Vec<RawRule> = serde_json::from_str(&content)?;
-
-    let rules: Vec<Rule> = raw_rules
-        .into_iter()
-        .map(Rule::try_from)
-        .collect::<Result<_, _>>()?;
-
-    Ok(rules)
-}
-
-pub async fn apply_rules_tcp(
-    rules: &Vec<Rule>,
-    tcp_event: TcpEvent,
-    producer: &FutureProducer,
-    map: &mut CorrelationState,
-) -> anyhow::Result<(), anyhow::Error> {
-    let event = json!(tcp_event);
-
-    for rule in rules {
-        if !rule.matches(&tcp_event) {
-            continue;
-        }
-
-        let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let key = rule.severity.to_str();
-
-        if let Some(group_key) = rule.group_key(&event) {
-            if map.process(rule, &group_key, &event)? {
-                let alert = Alert {
-                    timestamp: timestamp,
-                    name: &rule.name,
-                    threshold: 0,
-                    event: json!(tcp_event),
-                    severity: rule.severity.clone(),
-                };
-
-                let serialized_data = serde_json::to_vec(&alert)?;
-                connect_kafka(serialized_data, "alerts.events", key, &producer)
-                    .await
-                    .unwrap();
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_load_rules() {
-    let s = laod_rules();
-    assert!(s.is_ok())
-}
+// pub fn laod_rules() -> anyhow::Result<Vec<Rule>, anyhow::Error> {
+//     let mut file = File::open("/home/vamsi/scripts/watch-watch/src/complex_rules.json")?;
+//     let mut content = String::new();
+//     file.read_to_string(&mut content);
+//
+//     let raw_rules: Vec<RawRule> = serde_json::from_str(&content)?;
+//
+//     let rules: Vec<Rule> = raw_rules
+//         .into_iter()
+//         .map(Rule::try_from)
+//         .collect::<Result<_, _>>()?;
+//
+//     Ok(rules)
+// }
+//
+// #[test]
+// fn test_load_rules() {
+//     let s = laod_rules();
+//     assert!(s.is_ok())
+// }
