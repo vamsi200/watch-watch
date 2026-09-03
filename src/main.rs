@@ -31,6 +31,7 @@ pub fn project_directory() -> Option<ProjectDirs> {
 #[derive(Serialize, Deserialize)]
 struct ServerConfig {
     boot_strap_servers: Vec<String>,
+    topics: Vec<String>,
 }
 
 fn get_bootstrap_servers() -> anyhow::Result<Vec<String>> {
@@ -56,6 +57,7 @@ fn get_bootstrap_servers() -> anyhow::Result<Vec<String>> {
             Err(_) => {
                 let server_config = ServerConfig {
                     boot_strap_servers: Vec::new(),
+                    topics: Vec::new(),
                 };
 
                 file.write_all(toml::to_string_pretty(&server_config)?.as_bytes())?;
