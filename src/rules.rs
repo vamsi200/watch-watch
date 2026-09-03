@@ -1,8 +1,5 @@
 #![allow(unused)]
-use crate::{
-    parser::{EventType, serialize_data},
-    producer::connect_kafka,
-};
+use crate::parser::{EventType, serialize_data};
 use anyhow::Error;
 use chrono::{DateTime, Utc};
 use clap::builder::Str;

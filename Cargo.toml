@@ -14,3 +14,5 @@ clap = { version = "4.5.60", features = ["derive"] }
 log = "0.4.30"
 bpfx = {path = "/home/vamsi/scripts/bpfx/", features = ["serde"]}
 futures = "0.3.34"
+toml = "1.1.5"
+directories = "6.0.0"

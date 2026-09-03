@@ -12,13 +12,15 @@ use rdkafka::{
     producer::FutureProducer,
 };
 use serde_json::{Map, from_value, json};
-use tokio::sync::mpsc::UnboundedSender;
 
-pub async fn consume_events(topic_name: Vec<&str>) -> anyhow::Result<(), anyhow::Error> {
+pub async fn consume_events(
+    topic_name: Vec<&str>,
+    boot_strap_servers: Vec<String>,
+) -> anyhow::Result<(), anyhow::Error> {
     println!("Starting the consumer..");
     let consumer: StreamConsumer = ClientConfig::new()
         .set("group.id", "ids")
-        .set("bootstrap.servers", "192.168.1.7:9092")
+        .set("bootstrap.servers", boot_strap_servers.join(","))
         .set("auto.offset.reset", "earliest")
         .create()
         .with_context(|| "Failed to create consumer")?;
