@@ -3,6 +3,7 @@
 use bpfx::{Bpfx, NetworkFilter};
 use clap::Parser;
 use directories::ProjectDirs;
+use nanoid::alphabet::SAFE;
 use rdkafka::ClientConfig;
 use rdkafka::producer::FutureProducer;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use tokio::time::sleep;
 use watch_watch::consumer::consume_events;
 use watch_watch::parser::{self, EventType, PidMap, serialize_data};
 use watch_watch::rules::Alert;
+use watch_watch::server::{Server, start_server};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -74,10 +76,19 @@ fn get_bootstrap_servers() -> anyhow::Result<Vec<String>> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let topic_list = vec!["connect", "accept", "close", "bind", "listen"];
-    let boot_strap_servers = get_bootstrap_servers()?;
-    consume_events(topic_list, boot_strap_servers)
-        .await
-        .unwrap();
+    // let topic_list = vec!["connect", "accept", "close", "bind", "listen"];
+    // let boot_strap_servers = get_bootstrap_servers()?;
+    // consume_events(topic_list, boot_strap_servers)
+    //     .await
+    //     .unwrap();
+
+    // let server = Server {
+    //     addr: "0.0.0.0",
+    //     port: 8092,
+    // };
+    //
+    // start_server(server).await;
+    println!("{}", nanoid::nanoid!(32, &SAFE));
+
     Ok(())
 }

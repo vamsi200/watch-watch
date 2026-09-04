@@ -1,5 +1,6 @@
 pub mod config;
 pub mod consumer;
+pub mod db;
 pub mod kafka;
 pub mod parser;
 pub mod reg;
