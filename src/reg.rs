@@ -37,18 +37,18 @@ pub struct Agent {
 }
 
 pub fn create_enrollment_token(
-    connection: Connection,
+    connection: &Connection,
     profile_id: ProfileId,
     expiration: DateTime<Utc>,
     max_uses: i64,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, String)> {
     let dt = Local::now();
     let created_at = dt.to_utc();
     let token = nanoid::nanoid!(32, &SAFE);
     let id = nanoid::nanoid!(16, &SAFE);
 
     let enrollment_token = EnrollmentToken {
-        id,
+        id: id.clone(),
         token: token.clone(),
         profile_id,
         expires_at: expiration,
@@ -60,7 +60,7 @@ pub fn create_enrollment_token(
 
     update_enrollment_tokens(&connection, enrollment_token)?;
 
-    Ok(token)
+    Ok((token, id))
 }
 
 pub fn create_collector_profile(
@@ -73,7 +73,7 @@ pub fn create_collector_profile(
     Ok(())
 }
 
-pub fn create_profile(connection: Connection, profile: Profile) -> anyhow::Result<()> {
+pub fn create_profile(connection: &Connection, profile: Profile) -> anyhow::Result<()> {
     update_profile(&connection, profile)?;
     Ok(())
 }
@@ -88,18 +88,20 @@ pub fn get_profiles(connection: Connection) -> anyhow::Result<Vec<Profile>> {
 
 pub fn get_collector_profile(profile_id: &str) -> anyhow::Result<CollectorProfile> {
     //TODO: change this
-    let connection = Connection::open("./test.db").unwrap();
+    let connection = Connection::open("/home/vamsi/.local/share/watch-watch/test.db").unwrap();
     Ok(fetch_collector_profile(&connection, profile_id)?)
 }
 
 pub fn validate_token(token: &String) -> (bool, String) {
     //TODO: change this
-    let connection = Connection::open("./test.db").unwrap();
+    let connection = Connection::open("/home/vamsi/.local/share/watch-watch/test.db").unwrap();
 
-    if let Ok(profile_id) = fetch_profile_id_by_token(&connection, token) {
-        (true, profile_id)
-    } else {
-        (false, String::new())
+    match fetch_profile_id_by_token(&connection, token) {
+        Ok(profile_id) => (true, profile_id),
+        Err(e) => {
+            eprintln!("{e}");
+            (false, String::new())
+        }
     }
 }
 

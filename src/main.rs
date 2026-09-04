@@ -1,21 +1,33 @@
 #![allow(unused)]
 
 use bpfx::{Bpfx, NetworkFilter};
+use chrono::{DateTime, Days, Utc};
 use clap::Parser;
 use directories::ProjectDirs;
 use nanoid::alphabet::SAFE;
 use rdkafka::ClientConfig;
 use rdkafka::producer::FutureProducer;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, OpenOptions, exists};
+use std::fs::{self, OpenOptions, create_dir_all, exists};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::time::sleep;
+use watch_watch::config::{
+    CollectorConfig, CollectorKafkaConfig, CollectorProfile, Profile, TopicsConfig,
+};
 use watch_watch::consumer::consume_events;
+use watch_watch::db::{create_tables, fetch_profiles, fetch_tokens, table_exists};
 use watch_watch::parser::{self, EventType, PidMap, serialize_data};
+use watch_watch::reg::{
+    create_collector_profile, create_enrollment_token, create_profile, get_collector_profile,
+    validate_token,
+};
 use watch_watch::rules::Alert;
 use watch_watch::server::{Server, start_server};
 
@@ -30,6 +42,14 @@ pub fn project_directory() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "watch-watch", env!("CARGO_PKG_NAME"))
 }
 
+pub fn get_db(project_dirs: &ProjectDirs) -> anyhow::Result<PathBuf> {
+    let path = project_dirs.data_dir().to_path_buf();
+    if !exists(&path)? {
+        create_dir_all(&path);
+        OpenOptions::new().create(true).open(path.join("test.db"))?;
+    }
+    Ok(path)
+}
 #[derive(Serialize, Deserialize)]
 struct ServerConfig {
     boot_strap_servers: Vec<String>,
@@ -74,6 +94,11 @@ fn get_bootstrap_servers() -> anyhow::Result<Vec<String>> {
     return Err(anyhow::Error::msg("Failed to get config directory"));
 }
 
+fn init(connection: &Connection) -> anyhow::Result<()> {
+    create_tables(&connection)?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // let topic_list = vec!["connect", "accept", "close", "bind", "listen"];
@@ -82,13 +107,66 @@ async fn main() -> anyhow::Result<()> {
     //     .await
     //     .unwrap();
 
-    // let server = Server {
-    //     addr: "0.0.0.0",
-    //     port: 8092,
+    let server = Server {
+        addr: "0.0.0.0",
+        port: 8092,
+    };
+
+    start_server(server).await;
+
+    // let path = get_db(&project_directory().unwrap())?;
+    // //
+    // let connection = Connection::open(path.join("test.db"))?;
+    //
+    // let collector_kafka_config = CollectorKafkaConfig {
+    //     bootstrap_servers: vec![String::from("192.168.1.7:9092")],
     // };
     //
-    // start_server(server).await;
-    println!("{}", nanoid::nanoid!(32, &SAFE));
+    // let topics_config = TopicsConfig::default();
+    //
+    // let profile = Profile {
+    //     name: String::from("production"),
+    //     kafka_cluster: String::from("cluster-01"),
+    //     version: 1,
+    //     kafka_config: collector_kafka_config,
+    //     config: topics_config,
+    //     agents_enrolled: 0,
+    // };
+    //
+    // init(&connection)?;
+    // create_profile(&connection, profile)?;
+    //
+    // let s = fetch_profiles(&connection)?;
+    // println!("{s:#?}");
+    //
+    // let expiration = Utc::now().checked_add_days(Days::new(1)).unwrap();
+    //
+    // let (token, id) =
+    //     create_enrollment_token(&connection, s.get(0).unwrap().name.clone(), expiration, 10)?;
+    //
+    // println!("Token: {token}");
+    //
+    // let profile_id = s.get(0).unwrap().name.clone();
+    //
+    // let collector_profile = CollectorProfile {
+    //     name: profile_id.clone(),
+    //     config: CollectorConfig {
+    //         version: s.get(0).unwrap().version,
+    //         kafka: s.get(0).unwrap().kafka_config.clone(),
+    //         topics: s.get(0).unwrap().config.clone(),
+    //     },
+    // };
 
+    // println!("{:?}", fetch_tokens(&connection));
+    // create_collector_profile(&connection, collector_profile, profile_id.clone(), id)?;
+    //
+    // println!(
+    //     "{:?}",
+    //     validate_token(&String::from("DZOhzNwswp4-TH6eWuuCQQ5JEadxUn-y"))
+    // );
+    //
+    // println!("{:#?}", get_collector_profile(&profile_id));
+    //
+    // connection.close();
     Ok(())
 }

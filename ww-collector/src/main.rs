@@ -1,11 +1,22 @@
 #![allow(unused)]
+use anyhow::anyhow;
+use bpfx::network::*;
 use std::fs::{self, File, OpenOptions, exists};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
+use ww_collector::enroll::{self, CollectorProfile};
 
-use anyhow::anyhow;
-use bpfx::network::*;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+pub struct Args {
+    #[arg(long, help = "server address")]
+    pub server: String,
+    #[arg(long, help = "token")]
+    pub token: String,
+}
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -47,7 +58,10 @@ pub fn project_directory() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "watch-watch", env!("CARGO_PKG_NAME"))
 }
 
-fn get_config_path() -> anyhow::Result<(FutureProducer, String)> {
+fn get_config_path(
+    config: CollectorProfile,
+    agent_id: String,
+) -> anyhow::Result<(FutureProducer, String)> {
     if let Some(project_dirs) = project_directory() {
         let config_dir = project_dirs.config_dir();
         let config_path = config_dir.join("collector.toml");
@@ -76,8 +90,8 @@ fn get_config_path() -> anyhow::Result<(FutureProducer, String)> {
             }
             Err(_) => {
                 let config = Config {
-                    boot_strap_servers: Vec::new(),
-                    agent_id: Uuid::new_v4().to_string(),
+                    boot_strap_servers: config.config.kafka.bootstrap_servers,
+                    agent_id,
                 };
 
                 file.write_all(toml::to_string_pretty(&config)?.as_bytes())?;
@@ -151,7 +165,12 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let client = get_config_path();
+    let mut args = Args::parse();
+
+    let agent = Uuid::new_v4().to_string();
+    let config = enroll::enroll(&args.server, &args.token, &agent)?;
+
+    let client = get_config_path(config, agent);
 
     if let Err(client) = client {
         anyhow::bail!("Failed to get kafka config, aborting..");

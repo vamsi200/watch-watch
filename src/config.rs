@@ -27,12 +27,25 @@ pub struct TopicsConfig {
     pub listen: String,
 }
 
+impl Default for TopicsConfig {
+    fn default() -> Self {
+        TopicsConfig {
+            connect: String::from("connect"),
+            accept: String::from("accept"),
+            close: String::from("close"),
+            bind: String::from("bind"),
+            listen: String::from("listen"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CollectorProfile {
     pub name: String,
     pub config: CollectorConfig,
 }
 
+#[derive(Debug)]
 pub struct Profile {
     pub name: String,
     pub kafka_cluster: String,
