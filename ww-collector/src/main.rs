@@ -1,21 +1,33 @@
 #![allow(unused)]
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use bpfx::network::*;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::fs::{self, File, OpenOptions, exists};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Duration;
-use ww_collector::enroll::{self, CollectorProfile};
+use ww_collector::enroll::{self, CollectorProfile, generate_key_pair};
 
-use clap::Parser;
+#[derive(Debug, Clone, ClapArgs)]
+pub struct ServerArgs {
+    #[arg(long, help = "server address")]
+    pub server: String,
+
+    #[arg(long, help = "token")]
+    pub token: String,
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Args {
-    #[arg(long, help = "server address")]
-    pub server: String,
-    #[arg(long, help = "token")]
-    pub token: String,
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    Enroll(ServerArgs),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,59 +70,69 @@ pub fn project_directory() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "watch-watch", env!("CARGO_PKG_NAME"))
 }
 
-fn get_config_path(
-    config: CollectorProfile,
-    agent_id: String,
-) -> anyhow::Result<(FutureProducer, String)> {
-    if let Some(project_dirs) = project_directory() {
-        let config_dir = project_dirs.config_dir();
-        let config_path = config_dir.join("collector.toml");
-        if !exists(config_dir)? {
-            fs::create_dir_all(config_dir)?;
-        }
+pub const CONFIG_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| project_directory().unwrap().config_dir().to_path_buf());
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(config_path)?;
-        let mut buf = String::new();
-        file.read_to_string(&mut buf)?;
+pub const CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+    project_directory()
+        .unwrap()
+        .config_dir()
+        .to_path_buf()
+        .join("collector.toml")
+});
 
-        match toml::from_str::<Config>(&buf) {
-            Ok(config) => {
-                let servers = config.boot_strap_servers;
-                return Ok((
-                    ClientConfig::new()
-                        .set("bootstrap.servers", servers.join(","))
-                        .create()
-                        .unwrap(),
-                    config.agent_id,
-                ));
-            }
-            Err(_) => {
-                let config = Config {
-                    boot_strap_servers: config.config.kafka.bootstrap_servers,
-                    agent_id,
-                };
-
-                file.write_all(toml::to_string_pretty(&config)?.as_bytes())?;
-
-                return Err(anyhow::Error::msg(
-                    "Failed to parse kafka config, aborting..",
-                ));
-            }
-        };
+fn create_config_dir() -> anyhow::Result<()> {
+    if !exists(project_directory().unwrap().config_dir())? {
+        fs::create_dir_all(CONFIG_DIR.as_path())?;
     }
+    Ok(())
+}
 
-    return Err(anyhow::Error::msg("Failed to get config directory"));
+fn get_config_path() -> anyhow::Result<(FutureProducer, String)> {
+    create_config_dir()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(CONFIG_PATH.as_path())?;
+
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)?;
+
+    let config: Config = toml::from_str(&buf)?;
+
+    let producer = ClientConfig::new()
+        .set("bootstrap.servers", config.boot_strap_servers.join(","))
+        .create()?;
+
+    Ok((producer, config.agent_id))
+}
+
+fn write_to_config(config: CollectorProfile, agent_id: String) -> anyhow::Result<()> {
+    println!("[INFO] Writing to `{}`", CONFIG_PATH.as_path().display());
+
+    create_config_dir()?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(CONFIG_PATH.as_path())?;
+
+    let config = Config {
+        boot_strap_servers: config.config.kafka.bootstrap_servers,
+        agent_id,
+    };
+
+    file.write_all(toml::to_string_pretty(&config)?.as_bytes())?;
+
+    Ok(())
 }
 
 pub async fn send_network_events(
     mut network: PollNetwork,
     sender: tokio::sync::mpsc::Sender<EventType>,
 ) -> anyhow::Result<()> {
-    println!("sending events..");
+    println!("[INFO] Sending Network events..");
 
     loop {
         tokio::select! {
@@ -167,16 +189,18 @@ use uuid::Uuid;
 async fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
 
-    let agent = Uuid::new_v4().to_string();
-    let config = enroll::enroll(&args.server, &args.token, &agent)?;
-
-    let client = get_config_path(config, agent);
-
-    if let Err(client) = client {
-        anyhow::bail!("Failed to get kafka config, aborting..");
+    let agent_id = Uuid::new_v4().to_string();
+    match args.command {
+        Command::Enroll(args) => {
+            let public_key = generate_key_pair(&agent_id)?;
+            let config = enroll::enroll(&args.server, &args.token, &agent_id, public_key)?;
+            write_to_config(config, agent_id)?;
+        }
     }
 
-    let (client, key) = client?;
+    let (client, key) = get_config_path()
+        .context("Failed to get kafka config, aborting.. have you enrolled? See --help")?;
+
     let (sender_tx, mut receiver_rx) = tokio::sync::mpsc::channel::<EventType>(1024);
 
     let mut bpfx = Bpfx::new()?;

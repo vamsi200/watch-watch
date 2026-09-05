@@ -41,8 +41,8 @@ pub fn create_tables(connection: &Connection) -> anyhow::Result<()> {
 
     connection.execute(
         "CREATE TABLE IF NOT EXISTS agents (
-            id           BLOB PRIMARY KEY,
-            profile_id   BLOB NOT NULL REFERENCES collector_profiles(id),
+            id           TEXT PRIMARY KEY,
+            profile_id   TEXT NOT NULL REFERENCES collector_profiles(id),
             public_key   BLOB NOT NULL,
             registered_at INTEGER NOT NULL,
             revoked      INTEGER NOT NULL DEFAULT 0
@@ -224,8 +224,66 @@ pub fn fetch_tokens(connection: &Connection) -> anyhow::Result<Vec<String>> {
     Ok(hashes)
 }
 
-pub fn update_agents(connection: Connection, agent: Agent) -> anyhow::Result<()> {
-    todo!()
+pub fn update_agents(connection: &Connection, agent: Agent) -> anyhow::Result<()> {
+    connection.execute(
+        "INSERT INTO agents
+            (id, profile_id, public_key, registered_at, revoked)
+         VALUES
+            (:id, :profile_id, :public_key, :registered_at, :revoked)",
+        rusqlite::named_params! {
+            ":id": agent.id,
+            ":profile_id": agent.profile_id,
+            ":public_key": agent.public_key,
+            ":registered_at": agent.registered_at,
+            ":revoked": agent.revoked,
+        },
+    )?;
+
+    Ok(())
+}
+
+pub fn fecth_agent(connection: &Connection, agent_id: String) -> anyhow::Result<Agent> {
+    let mut statement = connection
+        .prepare("SELECT id, profile_id, public_key, registered_at, revoked WHERE id = ?1")?;
+
+    let agent = statement.query_row([agent_id], |row| {
+        let id: String = row.get(0)?;
+        let profile_id: String = row.get(1)?;
+        let public_key: Vec<u8> = row.get(2)?;
+        let registered_at: DateTime<Utc> = row.get(3)?;
+        let revoked: bool = row.get(4)?;
+
+        Ok(Agent {
+            id,
+            profile_id,
+            public_key,
+            registered_at,
+            revoked,
+        })
+    })?;
+
+    Ok(agent)
+}
+
+pub fn fetch_agents(connection: &Connection) -> anyhow::Result<Vec<Agent>> {
+    let mut statement = connection.prepare(
+        "SELECT id, profile_id, public_key, registered_at, revoked
+         FROM agents",
+    )?;
+
+    let agents = statement
+        .query_map([], |row| {
+            Ok(Agent {
+                id: row.get(0)?,
+                profile_id: row.get(1)?,
+                public_key: row.get(2)?,
+                registered_at: row.get(3)?,
+                revoked: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(agents)
 }
 
 pub fn update_profile(connection: &Connection, profile: Profile) -> anyhow::Result<()> {

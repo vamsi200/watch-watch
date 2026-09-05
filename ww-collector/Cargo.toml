@@ -17,3 +17,6 @@ uuid = { version = "1.26.0", features = [
 ]}
 directories = "6.0.0"
 clap = { version = "4.6.6", features = ["derive"] }
+rand = "0.10.2"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+base64 = "0.23.1"

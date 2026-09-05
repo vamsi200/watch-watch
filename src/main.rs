@@ -22,7 +22,7 @@ use watch_watch::config::{
     CollectorConfig, CollectorKafkaConfig, CollectorProfile, Profile, TopicsConfig,
 };
 use watch_watch::consumer::consume_events;
-use watch_watch::db::{create_tables, fetch_profiles, fetch_tokens, table_exists};
+use watch_watch::db::{create_tables, fetch_agents, fetch_profiles, fetch_tokens, table_exists};
 use watch_watch::parser::{self, EventType, PidMap, serialize_data};
 use watch_watch::reg::{
     create_collector_profile, create_enrollment_token, create_profile, get_collector_profile,
@@ -99,6 +99,34 @@ fn init(connection: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+//Flow (Ui):
+//Profile Creation:
+//Require: Name of profile, kafka_cluster name, version, kafka_config aka boot_strap_servers
+// let collector_kafka_config = CollectorKafkaConfig {
+//     bootstrap_servers: vec![String::from("192.168.1.7:9092")],
+// };
+// topics config aka list of topics, default:
+// impl Default for TopicsConfig {
+//     fn default() -> Self {
+//         TopicsConfig {
+//             connect: String::from("connect"),
+//             accept: String::from("accept"),
+//             close: String::from("close"),
+//             bind: String::from("bind"),
+//             listen: String::from("listen"),
+//         }
+//     }
+// }
+//
+//Enrollment Token - Create profile if not existing, select it and select rest of params expiration, maximum uses.
+// - generates a Token
+//
+//Take the token and pass it to collector in which collector does this:
+//// ww-collector enroll \
+// --server https://bla-bla.example.com \
+// --token "$ENROLLMENT_TOKEN"
+//
+//collector gets collector config and writes to its local config file and uses it
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // let topic_list = vec!["connect", "accept", "close", "bind", "listen"];
@@ -107,16 +135,19 @@ async fn main() -> anyhow::Result<()> {
     //     .await
     //     .unwrap();
 
+    let path = get_db(&project_directory().unwrap())?;
+    let connection = Connection::open(path.join("test.db"))?;
     let server = Server {
         addr: "0.0.0.0",
         port: 8092,
     };
 
-    start_server(server).await;
+    // let s = fetch_profiles(&connection)?;
+    // println!("{s:#?}");
+    // start_server(server).await;
 
-    // let path = get_db(&project_directory().unwrap())?;
+    println!("{:#?}", fetch_agents(&connection)?);
     // //
-    // let connection = Connection::open(path.join("test.db"))?;
     //
     // let collector_kafka_config = CollectorKafkaConfig {
     //     bootstrap_servers: vec![String::from("192.168.1.7:9092")],

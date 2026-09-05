@@ -7,6 +7,9 @@
 // --server https://bla-bla.example.com \
 // --token "$ENROLLMENT_TOKEN"
 
+use base64::{alphabet::URL_SAFE, engine::general_purpose::URL_SAFE_NO_PAD_INDIFFERENT};
+use ed25519_dalek::SigningKey;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
@@ -40,14 +43,19 @@ pub struct TopicsConfig {
     pub listen: String,
 }
 
-pub fn enroll(server: &str, token: &str, agent: &str) -> anyhow::Result<CollectorProfile> {
+pub fn enroll(
+    server: &str,
+    token: &str,
+    agent: &str,
+    public_key: String,
+) -> anyhow::Result<CollectorProfile> {
     let mut stream = TcpStream::connect(server)?;
 
     let request = format!(
-        "GET /enroll?token={token}&agent_id={agent} HTTP/1.1\r\n\
-     Host: {server}\r\n\
-     Connection: close\r\n\
-     \r\n"
+        "GET /enroll?token={token}&agent_id={agent}&public_key={public_key} HTTP/1.1\r\n\
+         Host: {server}\r\n\
+         Connection: close\r\n\
+         \r\n"
     );
 
     stream.write_all(request.as_bytes())?;
@@ -65,4 +73,15 @@ pub fn enroll(server: &str, token: &str, agent: &str) -> anyhow::Result<Collecto
     let response: CollectorProfile = serde_json::from_str(&body)?;
 
     Ok(response)
+}
+
+pub fn generate_key_pair(agent_id: &str) -> anyhow::Result<String> {
+    use base64::prelude::*;
+
+    let mut csprng = UnwrapErr(SysRng);
+    let signing_key = SigningKey::generate(&mut csprng);
+    let verifying_key = signing_key.verifying_key();
+
+    let public_key = URL_SAFE_NO_PAD_INDIFFERENT.encode(verifying_key.to_bytes());
+    Ok(public_key)
 }

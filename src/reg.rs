@@ -1,6 +1,4 @@
 #![allow(unused)]
-use std::error::Error;
-
 use crate::{
     config::{
         AgentId, CollectorConfig, CollectorKafkaConfig, CollectorProfile, Profile, ProfileId,
@@ -8,15 +6,17 @@ use crate::{
     },
     db::{
         fetch_collector_profile, fetch_profile, fetch_profile_id_by_token, fetch_profiles,
-        update_collector_profile, update_enrollment_tokens, update_profile,
+        update_agents, update_collector_profile, update_enrollment_tokens, update_profile,
     },
     server::{Register, ServerError},
 };
 use axum::{Json, extract::Query};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD_INDIFFERENT, prelude::*};
 use chrono::{DateTime, Local, Utc};
 use nanoid::alphabet::SAFE;
 use rusqlite::Connection;
 use serde_json::{Value, json};
+use std::error::Error;
 
 pub struct EnrollmentToken {
     pub id: String,
@@ -29,9 +29,11 @@ pub struct EnrollmentToken {
     pub revoked: bool,
 }
 
+#[derive(Debug)]
 pub struct Agent {
-    pub id: AgentId,
-    pub profile_id: ProfileId,
+    pub id: AgentId,           // uuid from collector
+    pub profile_id: ProfileId, // profile it is using
+    pub public_key: Vec<u8>,
     pub registered_at: DateTime<Utc>,
     pub revoked: bool,
 }
@@ -89,7 +91,33 @@ pub fn get_profiles(connection: Connection) -> anyhow::Result<Vec<Profile>> {
 pub fn get_collector_profile(profile_id: &str) -> anyhow::Result<CollectorProfile> {
     //TODO: change this
     let connection = Connection::open("/home/vamsi/.local/share/watch-watch/test.db").unwrap();
-    Ok(fetch_collector_profile(&connection, profile_id)?)
+    let collector_profile = fetch_collector_profile(&connection, profile_id)?;
+    Ok(collector_profile)
+}
+
+pub fn encode_public_key(public_key: &[u8]) -> String {
+    BASE64_STANDARD.encode(public_key)
+}
+
+pub fn decode_public_key(public_key: &str) -> anyhow::Result<Vec<u8>> {
+    Ok(URL_SAFE_NO_PAD_INDIFFERENT.decode(public_key.as_bytes())?)
+}
+
+pub fn write_to_agent_db(public_key: String, token: &str, profile: &str) -> anyhow::Result<()> {
+    let connection = Connection::open("/home/vamsi/.local/share/watch-watch/test.db").unwrap();
+    let public_key = decode_public_key(&public_key)?;
+
+    let agent = Agent {
+        id: token.to_string(),
+        profile_id: profile.to_string(),
+        public_key,
+        registered_at: Utc::now(),
+        revoked: false,
+    };
+
+    update_agents(&connection, agent)?;
+
+    Ok(())
 }
 
 pub fn validate_token(token: &String) -> (bool, String) {
@@ -106,6 +134,8 @@ pub fn validate_token(token: &String) -> (bool, String) {
 }
 
 pub async fn register_agent(data: Query<Register>) -> Result<Json<CollectorProfile>, ServerError> {
+    println!("[INFO] got request: {:?}", data);
+
     let (status, profile_id) = validate_token(&data.0.token);
 
     if status {
@@ -116,10 +146,15 @@ pub async fn register_agent(data: Query<Register>) -> Result<Json<CollectorProfi
             )));
         }
         let collector_profile = collector_profile.unwrap();
+        write_to_agent_db(data.0.public_key, &data.0.token, &profile_id).unwrap();
         return Ok(axum::Json::from(collector_profile));
     } else {
         return Err(ServerError::Unauthorized);
     }
+}
+
+pub fn get_agents() -> anyhow::Result<Vec<Agent>> {
+    todo!()
 }
 
 pub fn get_agent(agent_id: AgentId) -> anyhow::Result<Agent> {

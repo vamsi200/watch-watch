@@ -38,6 +38,7 @@ pub struct Server {
 pub struct Register {
     pub token: String,
     pub agent_id: AgentId,
+    pub public_key: String,
 }
 
 pub fn send_collector_config() -> anyhow::Result<()> {
